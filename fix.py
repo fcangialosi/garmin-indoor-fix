@@ -39,13 +39,18 @@ def mile_split(dist, seconds):
     pace_sec = int((pace % 1) * 60)
     return f"{pace_min}:{pace_sec:02d}/mi"
 
+# returns pace as seconds per mile (rather than the typical minutes per mile)
+def parse_pace_secs_per_mile(s):
+    m,s = s.split(":")
+    return float(m) * 60 + float(s)
 
 # In normal mode, the expectation is that there are no pause within a lap, only pause *between* laps
 # In midlap pause (more common on treadmill), the expectation is that there are pauses within a lap
+# Expects laps file to specify distances in miles by default, but with --set-pace uses paces instead (for treadmill)
 """
 Adjust distances in TCX file based on laps text file
 """
-def fix(tcx, laps, use_recorded_time = False, midlap_pause = False):
+def fix(tcx, laps, use_recorded_time = False, midlap_pause = False, set_pace = False):
     # Load target TCX file
     tree = ET.parse(tcx)
     root = tree.getroot()
@@ -54,8 +59,11 @@ def fix(tcx, laps, use_recorded_time = False, midlap_pause = False):
     # Load txt file specifying *correct* lap distances (in miles)
     # Convert to meters since that's what TCX uses
     with open(laps) as f:
-        laps_dist_miles = [float(l.strip()) for l in f.readlines()]
-        laps_dist_meters = [miles_to_meters(x) for x in laps_dist_miles]
+        if set_pace:
+            laps_paces = [parse_pace_secs_per_mile(l.strip()) for l in f.readlines()]
+        else:
+            laps_dist_miles = [float(l.strip()) for l in f.readlines()]
+            laps_dist_meters = [miles_to_meters(x) for x in laps_dist_miles]
 
     # Extract the activity tag
     acts = root.find(GTag("Activities"))
@@ -65,7 +73,10 @@ def fix(tcx, laps, use_recorded_time = False, midlap_pause = False):
     act = acts_list[0]
     laps = act.findall(GTag('Lap'))
     # Number of laps must match what the text file specifies
-    assert len(laps) == len(laps_dist_miles), f"Found {len(laps)} in TCX, but {len(laps_dist_miles)} in laps text file"
+    if set_pace:
+        assert len(laps) == len(laps_paces), f"Found {len(laps)} in TCX, but {len(laps_paces)} in laps paces text file"
+    else:
+        assert len(laps) == len(laps_dist_miles), f"Found {len(laps)} in TCX, but {len(laps_dist_miles)} in laps distance text file"
 
     total_meters = 0.0
     total_time = 0.0
@@ -78,8 +89,15 @@ def fix(tcx, laps, use_recorded_time = False, midlap_pause = False):
 
         lap = laps[lap_idx]
         lap_dist = lap.find(GTag('DistanceMeters'))
+        recorded_len = float(lap.find(GTag('TotalTimeSeconds')).text)
         old_lap_meters = float(lap_dist.text)
-        lap_dist_meters = laps_dist_meters[lap_idx]
+
+        if set_pace:
+            lap_pace = laps_paces[lap_idx]
+            lap_dist_miles = recorded_len / lap_pace
+            lap_dist_meters = miles_to_meters(lap_dist_miles)
+        else:
+            lap_dist_meters = laps_dist_meters[lap_idx]
         lap_dist.text = str(round(lap_dist_meters,2))
 
         old_lap_start = dateutil.parser.parse(lap.attrib['StartTime'])
@@ -118,7 +136,6 @@ def fix(tcx, laps, use_recorded_time = False, midlap_pause = False):
         prev_lap_start_t = lap_start_t
         lap_end_t = dateutil.parser.parse(tps[-1].find(GTag("Time")).text)
         adj_len = (lap_end_t - lap_start_t).total_seconds()
-        recorded_len = float(lap.find(GTag('TotalTimeSeconds')).text)
         if use_recorded_time:
             adj_len = recorded_len
         else:
